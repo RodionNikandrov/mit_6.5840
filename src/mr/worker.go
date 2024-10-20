@@ -1,6 +1,11 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
@@ -10,6 +15,12 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -23,38 +34,105 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	for {
+		reply, ok := RequestTaskCall()
+		if !ok {
+			return
+		}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+		switch reply.TaskType {
+		case Map:
+			content, err := os.ReadFile(reply.Filename)
+			if err != nil {
+				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, JobId: reply.TaskId})
+			}
+
+			intermediate := make([][]KeyValue, reply.NReduce)
+			omap := mapf(reply.Filename, string(content))
+			for _, kv := range omap {
+				partition := ihash(kv.Key) % reply.NReduce
+				intermediate[partition] = append(intermediate[partition], kv)
+			}
+
+			for idx, kvarr := range intermediate {
+				oname := fmt.Sprintf("../mr-tmp/mr-%v-%v.txt", reply.TaskId, idx)
+				ofile, _ := os.Create(oname)
+				enc := json.NewEncoder(ofile)
+				for _, kv := range kvarr {
+					err := enc.Encode(&kv)
+					if err != nil {
+						continue
+					}
+				}
+
+				ofile.Close()
+			}
+
+			ReportTaskCall(&CoordinatorCallArgs{TaskType: Map, WorkStatus: Completed, JobId: reply.TaskId, Filename: reply.Filename})
+		case Reduce:
+			filename := fmt.Sprintf("../mr-tmp/%v", reply.Filename)
+			file, err := os.Open(filename)
+			if err != nil {
+				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, JobId: reply.TaskId})
+			}
+
+			var reduceIn ByKey
+			dec := json.NewDecoder(file)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				reduceIn = append(reduceIn, kv)
+			}
+
+			file.Close()
+
+			ofilename := fmt.Sprintf("../mr-tmp/mr-out-%v.txt", reply.TaskId)
+			ofile, err := os.Create(ofilename)
+			if err != nil {
+				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, JobId: reply.TaskId})
+			}
+
+			for i := 0; i < len(reduceIn); {
+				j := i + 1
+				for j < len(reduceIn) && reduceIn[j].Key == reduceIn[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, reduceIn[k].Value)
+				}
+				output := reducef(reduceIn[i].Key, values)
+
+				fmt.Fprintf(ofile, "%v %v\n", reduceIn[i].Key, output)
+
+				i = j
+			}
+			ofile.Close()
+
+			ReportTaskCall(&CoordinatorCallArgs{TaskType: Reduce, WorkStatus: Completed, JobId: reply.TaskId, Filename: reply.Filename})
+		case Sleep:
+			time.Sleep(5 * time.Second)
+		}
+	}
 
 }
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+func RequestTaskCall() (*CoordinatorCallReply, bool) {
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+	args := CoordinatorCallArgs{}
 
-	// fill in the argument(s).
-	args.X = 99
+	reply := CoordinatorCallReply{}
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+	ok := call("Coordinator.RequestTask", &args, &reply)
+	return &reply, ok
+}
 
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
-	}
+func ReportTaskCall(args *CoordinatorCallArgs) {
+	reply := CoordinatorCallReply{}
+	call("Coordinator.ReportTask", &args, &reply)
+	return
 }
 
 // send an RPC request to the coordinator, wait for the response.

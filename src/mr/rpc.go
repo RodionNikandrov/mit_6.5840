@@ -9,17 +9,38 @@ package mr
 import "os"
 import "strconv"
 
+type TaskType int
+
+const (
+	Sleep TaskType = iota
+	Map
+	Reduce
+)
+
+type WorkStatus int
+
+const (
+	Completed WorkStatus = iota
+	Failed
+)
+
 //
 // example to show how to declare the arguments
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
+type CoordinatorCallArgs struct {
+	TaskType   TaskType
+	WorkStatus WorkStatus
+	JobId      int
+	Filename   string
 }
 
-type ExampleReply struct {
-	Y int
+type CoordinatorCallReply struct {
+	TaskType TaskType
+	TaskId   int
+	Filename string
+	NReduce  int
 }
 
 // Add your RPC definitions here.
