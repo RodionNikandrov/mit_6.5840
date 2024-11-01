@@ -44,7 +44,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case Map:
 			content, err := os.ReadFile(reply.Filename)
 			if err != nil {
-				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, JobId: reply.TaskId})
+				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, TaskId: reply.TaskId})
 			}
 
 			intermediate := make([][]KeyValue, reply.NReduce)
@@ -68,12 +68,12 @@ func Worker(mapf func(string, string) []KeyValue,
 				ofile.Close()
 			}
 
-			ReportTaskCall(&CoordinatorCallArgs{TaskType: Map, WorkStatus: Completed, JobId: reply.TaskId, Filename: reply.Filename})
+			ReportTaskCall(&CoordinatorCallArgs{TaskType: Map, WorkStatus: Completed, TaskId: reply.TaskId, Filename: reply.Filename})
 		case Reduce:
 			filename := fmt.Sprintf("../mr-tmp/%v", reply.Filename)
 			file, err := os.Open(filename)
 			if err != nil {
-				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, JobId: reply.TaskId})
+				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, TaskId: reply.TaskId})
 			}
 
 			var reduceIn ByKey
@@ -91,7 +91,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			ofilename := fmt.Sprintf("../mr-tmp/mr-out-%v.txt", reply.TaskId)
 			ofile, err := os.Create(ofilename)
 			if err != nil {
-				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, JobId: reply.TaskId})
+				ReportTaskCall(&CoordinatorCallArgs{WorkStatus: Failed, TaskId: reply.TaskId})
 			}
 
 			for i := 0; i < len(reduceIn); {
@@ -111,9 +111,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			ofile.Close()
 
-			ReportTaskCall(&CoordinatorCallArgs{TaskType: Reduce, WorkStatus: Completed, JobId: reply.TaskId, Filename: reply.Filename})
+			ReportTaskCall(&CoordinatorCallArgs{TaskType: Reduce, WorkStatus: Completed, TaskId: reply.TaskId, Filename: reply.Filename})
 		case Sleep:
-			time.Sleep(5 * time.Second)
+			time.Sleep(1 * time.Second)
+		default:
+			time.Sleep(1 * time.Second)
 		}
 	}
 

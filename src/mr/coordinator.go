@@ -13,10 +13,10 @@ import "os"
 import "net/rpc"
 import "net/http"
 
-const WorkerAssumeDeadTimeout = 10 * time.Second
+const AssumeWorkerDeadTimeout = 10 * time.Second
 
 type Coordinator struct {
-	MapTasksStatus    map[string]MapTaskStatus
+	MapTasksStatus    map[int]MapTaskStatus
 	ReduceTasksStatus map[int]TaskStatus
 	Phase             Phase
 	NReduce           int
@@ -25,7 +25,7 @@ type Coordinator struct {
 
 type MapTaskStatus struct {
 	TaskStatus TaskStatus
-	TaskId     int
+	Filename   string
 }
 
 type TaskStatus int
@@ -48,56 +48,44 @@ const (
 func (c *Coordinator) RequestTask(_, reply *CoordinatorCallReply) error {
 	switch c.Phase {
 	case MapPhase:
-		filename := ""
-
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
 		for k, v := range c.MapTasksStatus {
 			if v.TaskStatus == Idle {
-				filename = k
-				break
+				reply.TaskType = Map
+				reply.TaskId = k
+				reply.Filename = v.Filename
+				reply.NReduce = c.NReduce
+				taskStatus := c.MapTasksStatus[k]
+				taskStatus.TaskStatus = InProgress
+				c.MapTasksStatus[k] = taskStatus
+
+				go c.checkTaskStatus(k)
+				return nil
 			}
 		}
 
-		if len(filename) == 0 {
-			reply.TaskType = Sleep
-			return nil
-		}
-		reply.TaskType = Map
-		reply.TaskId = c.MapTasksStatus[filename].TaskId
-		reply.Filename = filename
-		reply.NReduce = c.NReduce
-		taskStatus := c.MapTasksStatus[filename]
-		taskStatus.TaskStatus = InProgress
-		c.MapTasksStatus[filename] = taskStatus
-
-		return nil
-
+		reply.TaskType = Sleep
 	case ShufflePhase:
 		reply.TaskType = Sleep
 	case ReducePhase:
-		filename := ""
-		var jobId int
-
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
 		for k, v := range c.ReduceTasksStatus {
 			if v == Idle {
-				jobId = k
-				filename = fmt.Sprintf("mr-%v.txt", jobId)
-				break
+				reply.TaskType = Reduce
+				reply.TaskId = k
+				reply.Filename = fmt.Sprintf("mr-%v.txt", k)
+				c.ReduceTasksStatus[k] = InProgress
+
+				go c.checkTaskStatus(k)
+				return nil
 			}
 		}
-		if len(filename) == 0 {
-			reply.TaskType = Sleep
-			return nil
-		}
-		reply.TaskType = Reduce
-		reply.TaskId = jobId
-		reply.Filename = filename
-		c.ReduceTasksStatus[jobId] = InProgress
+
+		reply.TaskType = Sleep
 	case Finished:
 	}
 	return nil
@@ -110,9 +98,9 @@ func (c *Coordinator) ReportTask(args *CoordinatorCallArgs, reply *CoordinatorCa
 	switch c.Phase {
 	case MapPhase:
 		if args.WorkStatus == Completed {
-			taskStatus := c.MapTasksStatus[args.Filename]
+			taskStatus := c.MapTasksStatus[args.TaskId]
 			taskStatus.TaskStatus = Done
-			c.MapTasksStatus[args.Filename] = taskStatus
+			c.MapTasksStatus[args.TaskId] = taskStatus
 			mapDone := true
 			for _, v := range c.MapTasksStatus {
 				if v.TaskStatus != Done {
@@ -126,9 +114,9 @@ func (c *Coordinator) ReportTask(args *CoordinatorCallArgs, reply *CoordinatorCa
 				c.Shuffle()
 			}
 		} else {
-			taskStatus := c.MapTasksStatus[args.Filename]
+			taskStatus := c.MapTasksStatus[args.TaskId]
 			taskStatus.TaskStatus = Idle
-			c.MapTasksStatus[args.Filename] = taskStatus
+			c.MapTasksStatus[args.TaskId] = taskStatus
 		}
 	case ShufflePhase:
 	case ReducePhase:
@@ -137,7 +125,7 @@ func (c *Coordinator) ReportTask(args *CoordinatorCallArgs, reply *CoordinatorCa
 		}
 
 		if args.WorkStatus == Completed {
-			c.ReduceTasksStatus[args.JobId] = Done
+			c.ReduceTasksStatus[args.TaskId] = Done
 
 			reduceDone := true
 			for _, v := range c.ReduceTasksStatus {
@@ -152,14 +140,14 @@ func (c *Coordinator) ReportTask(args *CoordinatorCallArgs, reply *CoordinatorCa
 			}
 
 		} else {
-			c.ReduceTasksStatus[args.JobId] = Idle
+			c.ReduceTasksStatus[args.TaskId] = Idle
 		}
 	case Finished:
 	}
 	return nil
 }
 
-func (c *Coordinator) Shuffle() error {
+func (c *Coordinator) Shuffle() {
 	for i := 0; i < c.NReduce; i++ {
 		var partition ByKey
 		for j := 0; j < len(c.MapTasksStatus); j++ {
@@ -208,8 +196,6 @@ func (c *Coordinator) Shuffle() error {
 		c.ReduceTasksStatus[i] = Idle
 	}
 	c.Phase = ReducePhase
-
-	return nil
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -235,46 +221,25 @@ func (c *Coordinator) Done() bool {
 	return c.Phase == Finished
 }
 
-func checkWorkerStatus(c *Coordinator) {
-	inProgressTasks := make(map[int]time.Time)
-	for !c.Done() {
-		c.mu.Lock()
+func (c *Coordinator) checkTaskStatus(taskId int) {
+	time.Sleep(AssumeWorkerDeadTimeout)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-		switch c.Phase {
-		case MapPhase:
-			for filename, status := range c.MapTasksStatus {
-				startTime, ok := inProgressTasks[status.TaskId]
-				if status.TaskStatus == InProgress {
-					if !ok {
-						inProgressTasks[status.TaskId] = time.Now()
-					} else if time.Since(startTime) > WorkerAssumeDeadTimeout {
-						taskStatus := c.MapTasksStatus[filename]
-						taskStatus.TaskStatus = Idle
-						c.MapTasksStatus[filename] = taskStatus
-						delete(inProgressTasks, status.TaskId)
-					}
-				}
-			}
-		case ShufflePhase:
-		case ReducePhase:
-			for taskId, status := range c.ReduceTasksStatus {
-				startTime, ok := inProgressTasks[taskId]
-				if status == InProgress {
-					if !ok {
-						inProgressTasks[taskId] = time.Now()
-					} else if time.Since(startTime) > WorkerAssumeDeadTimeout {
-						c.ReduceTasksStatus[taskId] = Idle
-						delete(inProgressTasks, taskId)
-					}
-				}
-			}
-		case Finished:
-			c.mu.Unlock()
-			return
+	switch c.Phase {
+	case MapPhase:
+		status := c.MapTasksStatus[taskId]
+		if status.TaskStatus != Done {
+			status.TaskStatus = Idle
+			c.MapTasksStatus[taskId] = status
 		}
+	case ReducePhase:
 
-		c.mu.Unlock()
-		time.Sleep(5 * time.Second)
+		if c.ReduceTasksStatus[taskId] != Done {
+			c.ReduceTasksStatus[taskId] = Idle
+		}
+	case ShufflePhase:
+	case Finished:
 	}
 }
 
@@ -285,16 +250,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		NReduce:           nReduce,
 		Phase:             MapPhase,
-		MapTasksStatus:    make(map[string]MapTaskStatus),
+		MapTasksStatus:    make(map[int]MapTaskStatus),
 		ReduceTasksStatus: make(map[int]TaskStatus),
 	}
 
 	for idx, filename := range files {
-		c.MapTasksStatus[filename] = MapTaskStatus{TaskStatus: Idle, TaskId: idx}
+		c.MapTasksStatus[idx] = MapTaskStatus{TaskStatus: Idle, Filename: filename}
 	}
 
 	c.server()
 
-	go checkWorkerStatus(&c)
 	return &c
 }

@@ -32,7 +32,7 @@ const (
 type CoordinatorCallArgs struct {
 	TaskType   TaskType
 	WorkStatus WorkStatus
-	JobId      int
+	TaskId     int
 	Filename   string
 }
 
